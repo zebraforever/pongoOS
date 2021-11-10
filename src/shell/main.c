@@ -1,7 +1,7 @@
 /*
  * pongoOS - https://checkra.in
  *
- * Copyright (C) 2019-2020 checkra1n team
+ * Copyright (C) 2019-2021 checkra1n team
  *
  * This file is part of pongoOS.
  *
@@ -179,7 +179,7 @@ void panic_cmd(const char* cmd, char* args) {
     if (! *args) {
         panic("panic called from shell");
     } else {
-        panic(args);
+        panic("%s", args);
     }
 }
 

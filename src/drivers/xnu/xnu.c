@@ -1,7 +1,7 @@
-/* 
+/*
  * pongoOS - https://checkra.in
- * 
- * Copyright (C) 2019-2020 checkra1n team
+ *
+ * Copyright (C) 2019-2021 checkra1n team
  *
  * This file is part of pongoOS.
  *
@@ -11,10 +11,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,11 +22,15 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- * 
+ *
  */
 
 #include <pongo.h>
 void (*preboot_hook)(void);
+
+#ifndef jit_set_exec
+#   define jit_set_exec(mode) /* nop by default */
+#endif
 
 extern void* jit_alloc(size_t count, size_t size);
 extern void jit_free(void *mem);
@@ -96,13 +100,17 @@ void pongo_copy_xnu(const char *cmd, char *args) {
 void pongo_boot_xargs(const char* cmd, char* args) {
     if (args[0] == 0) {
         // get
-        iprintf("xnu boot arg cmdline: [%s]\n", (char*)((int64_t)gBootArgs->CommandLine - 0x800000000 + kCacheableView) );
+        iprintf("Xnu boot arg cmdline: [%s]\n", (char*)((int64_t)gBootArgs->iOS13.CommandLine - 0x800000000 + kCacheableView) );
     } else {
-        strcpy((char*)((int64_t)gBootArgs->CommandLine - 0x800000000 + kCacheableView ), args);
-        iprintf("set xnu boot arg cmdline to: [%s]\n", (char*)((int64_t)gBootArgs->CommandLine - 0x800000000 + kCacheableView ));
+        strcpy((char*)((int64_t)gBootArgs->iOS13.CommandLine - 0x800000000 + kCacheableView ), args);
+        iprintf("Set xnu boot arg cmdline to: [%s]\n", (char*)((int64_t)gBootArgs->iOS13.CommandLine - 0x800000000 + kCacheableView ));
+        if (strlen(args) > BOOT_LINE_LENGTH_iOS12) {
+            iprintf("This exceeds the size limit for iOS 12 and earlier, you better be on 13 or later.\n");
+        }
     }
 }
 
+_Static_assert(__builtin_offsetof(struct boot_args, deviceTreeLength) + 4 == __builtin_offsetof(struct boot_args, iOS13.CommandLine), "boot-args CommandLine offset");
 
 // DTree printing
 
@@ -273,12 +281,40 @@ static int dt_cbp(void *a, dt_node_t *node, int depth, const char *key, void *va
 void log_bootargs(const char *cmd, char *args)
 {
     struct boot_args* cBootArgs = (struct boot_args*)((uint64_t)gBootArgs - 0x800000000 + kCacheableView);
-    iprintf("gBootArgs:\n\tRevision: %x\n\tVersion: %x\n\tvirtBase: %llx\n\tphysBase %llx\n\tmemSize: %llx\n\ttopOfKernelData: %llx\n\tmachineType: %x\n\tdeviceTreeP: %llx\n\tdeviceTreeLength: %x\n\tCommandLine: %s\n\tbootFlags: %llx\n\tmemSizeActual: %llx\n", cBootArgs->Revision, cBootArgs->Version, cBootArgs->virtBase, cBootArgs->physBase, cBootArgs->memSize, cBootArgs->topOfKernelData, cBootArgs->machineType, (uint64_t)cBootArgs->deviceTreeP, cBootArgs->deviceTreeLength, cBootArgs->CommandLine, cBootArgs->bootFlags, cBootArgs->memSizeActual);
+    iprintf("gBootArgs:\n"
+            "\tRevision: 0x%x\n"
+            "\tVersion: 0x%x\n"
+            "\tvirtBase: 0x%llx\n"
+            "\tphysBase 0x%llx\n"
+            "\tmemSize: 0x%llx\n"
+            "\ttopOfKernelData: 0x%llx\n"
+            "\tmachineType: 0x%x\n"
+            "\tdeviceTreeP: 0x%llx\n"
+            "\tdeviceTreeLength: 0x%x\n"
+            "\tCommandLine: 0x%s\n"
+            "\tbootFlags (<=iOS12): 0x%llx\n"
+            "\tmemSizeActual (<=iOS12): 0x%llx\n"
+            "\tbootFlags (>=iOS13): 0x%llx\n"
+            "\tmemSizeActual (>=iOS13): 0x%llx\n",
+            cBootArgs->Revision,
+            cBootArgs->Version,
+            cBootArgs->virtBase,
+            cBootArgs->physBase,
+            cBootArgs->memSize,
+            cBootArgs->topOfKernelData,
+            cBootArgs->machineType,
+            (uint64_t)cBootArgs->deviceTreeP,
+            cBootArgs->deviceTreeLength,
+            cBootArgs->iOS13.CommandLine,
+            cBootArgs->iOS12.bootFlags,
+            cBootArgs->iOS12.memSizeActual,
+            cBootArgs->iOS13.bootFlags,
+            cBootArgs->iOS13.memSizeActual);
 }
 void log_dtree(const char *cmd, char *args)
 {
-    struct boot_args* cBootArgs = (struct boot_args*)((uint64_t)gBootArgs - 0x800000000 + kCacheableView);
-    iprintf("gBootArgs:\n\tRevision: %x\n\tVersion: %x\n\tvirtBase: %llx\n\tphysBase %llx\n\tmemSize: %llx\n\ttopOfKernelData: %llx\n\tmachineType: %x\n\tdeviceTreeP: %llx\n\tdeviceTreeLength: %x\n\tCommandLine: %s\n\tbootFlags: %llx\n\tmemSizeActual: %llx\n", cBootArgs->Revision, cBootArgs->Version, cBootArgs->virtBase, cBootArgs->physBase, cBootArgs->memSize, cBootArgs->topOfKernelData, cBootArgs->machineType, (uint64_t)cBootArgs->deviceTreeP, cBootArgs->deviceTreeLength, cBootArgs->CommandLine, cBootArgs->bootFlags, cBootArgs->memSizeActual);
+    //struct boot_args* cBootArgs = (struct boot_args*)((uint64_t)gBootArgs - 0x800000000 + kCacheableView);
+    //iprintf("gBootArgs:\n\tRevision: %x\n\tVersion: %x\n\tvirtBase: %llx\n\tphysBase %llx\n\tmemSize: %llx\n\ttopOfKernelData: %llx\n\tmachineType: %x\n\tdeviceTreeP: %llx\n\tdeviceTreeLength: %x\n\tCommandLine: %s\n\tbootFlags: %llx\n\tmemSizeActual: %llx\n", cBootArgs->Revision, cBootArgs->Version, cBootArgs->virtBase, cBootArgs->physBase, cBootArgs->memSize, cBootArgs->topOfKernelData, cBootArgs->machineType, (uint64_t)cBootArgs->deviceTreeP, cBootArgs->deviceTreeLength, cBootArgs->CommandLine, cBootArgs->bootFlags, cBootArgs->memSizeActual);
     dt_arg_t arg =
     {
         .name = NULL,
@@ -375,7 +411,7 @@ uint64_t xnu_ptr_to_va(void* ptr) {
 //       Kexts will never ever have been rebased when Pongo runs.
 static bool has_been_rebased(void) {
     static int8_t rebase_status = -1;
-    // First, determine whether we've been rebased. his feels really hacky, but it correctly covers all cases:
+    // First, determine whether we've been rebased. This feels really hacky, but it correctly covers all cases:
     //
     // 1. New-style kernels rebase themselves, so this is always false.
     // 2. Old-style kernels on a live device will always have been rebased.
@@ -662,9 +698,11 @@ void xnu_pf_maskmatch_match(struct xnu_pf_maskmatch* patch, uint8_t access_type,
         break;
     }
     if (val) {
+        jit_set_exec(0);
         if (patch->patch.pf_callback((struct xnu_pf_patch *)patch, cacheable_stream)) {
             patch->patch.has_fired = true;
         }
+        jit_set_exec(1);
     }
 }
 
@@ -683,9 +721,11 @@ void xnu_pf_ptr_to_data_match(struct xnu_pf_ptr_to_datamatch* patch, uint8_t acc
 
     if (pointer >= patch->range->va && pointer < (patch->range->va + patch->range->size)) {
         if (memcmp(patch->data, (void*)(pointer - patch->range->va + patch->range->cacheable_base), patch->datasz) == 0) {
+            jit_set_exec(0);
             if (patch->patch.pf_callback((struct xnu_pf_patch *)patch, cacheable_stream)) {
                 patch->patch.has_fired = true;
             }
+            jit_set_exec(1);
         }
     }
 }
@@ -1201,7 +1241,9 @@ void xnu_pf_apply(xnu_pf_range_t* range, xnu_pf_patchset_t* patchset) {
 
         void (*jit_match)(void* stream, void* stream_end);
         jit_match = (void*)patchset->jit_matcher;
+        jit_set_exec(1);
         jit_match(range->cacheable_base, range->cacheable_base + range->size);
+        jit_set_exec(0);
     } else {
         if (patchset->accesstype == XNU_PF_ACCESS_8BIT) xnu_pf_apply_8(range, patchset);
         else if (patchset->accesstype == XNU_PF_ACCESS_16BIT) xnu_pf_apply_16(range, patchset);

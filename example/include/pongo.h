@@ -4,10 +4,10 @@
 // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 // copies of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
-// 
+//
 // The above copyright notice and this permission notice shall be included in all
 // copies or substantial portions of the Software.
-// 
+//
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -15,11 +15,13 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-// 
 //
-//  Copyright (c) 2019-2020 checkra1n team
+//
+//  Copyright (C) 2019-2021 checkra1n team
 //  This file is part of pongoOS.
 //
+#ifndef PONGOH
+#define PONGOH
 
 #include <mach-o/loader.h>
 #include <stddef.h>
@@ -28,6 +30,8 @@
 #include <string.h>
 
 #define DT_KEY_LEN 0x20
+#define BOOT_LINE_LENGTH_iOS12 0x100
+#define BOOT_LINE_LENGTH_iOS13 0x260
 
 struct Boot_Video {
 	unsigned long	v_baseAddr;	/* Base address of video memory */
@@ -41,18 +45,31 @@ struct Boot_Video {
 typedef struct boot_args {
 	uint16_t		Revision;			/* Revision of boot_args structure */
 	uint16_t		Version;			/* Version of boot_args structure */
+	uint32_t		__pad0;
 	uint64_t		virtBase;			/* Virtual base of memory */
 	uint64_t		physBase;			/* Physical base of memory */
 	uint64_t		memSize;			/* Size of memory */
 	uint64_t		topOfKernelData;	/* Highest physical address used in kernel data area */
 	struct Boot_Video Video;				/* Video Information */
 	uint32_t		machineType;		/* Machine Type */
+	uint32_t		__pad1;
 	void			*deviceTreeP;		/* Base of flattened device tree */
 	uint32_t		deviceTreeLength;	/* Length of flattened tree */
-	char			CommandLine[256];	/* Passed in command line */
-	uint64_t		bootFlags;		/* Additional flags specified by the bootloader */
-	uint64_t		memSizeActual;		/* Actual size of memory */
-} boot_args;
+	union {
+		struct {
+			char			CommandLine[BOOT_LINE_LENGTH_iOS12];	/* Passed in command line */
+			uint32_t		__pad;
+			uint64_t		bootFlags;		/* Additional flags specified by the bootloader */
+			uint64_t		memSizeActual;		/* Actual size of memory */
+		} iOS12;
+		struct {
+			char			CommandLine[BOOT_LINE_LENGTH_iOS13];	/* Passed in command line */
+			uint32_t		__pad;
+			uint64_t		bootFlags;		/* Additional flags specified by the bootloader */
+			uint64_t		memSizeActual;		/* Actual size of memory */
+		} iOS13;
+	};
+} __attribute__((packed)) boot_args;
 
 typedef struct
 {
@@ -68,18 +85,6 @@ typedef struct
     char val[];
 } dt_prop_t;
 
-typedef struct
-{
-    const char* name;
-    dt_node_t* node;
-} dt_find_cb_t;
-
-typedef struct
-{
-    const char* key;
-    void* val;
-    uint32_t len;
-} dt_prop_cb_t;
 struct memmap {
     uint64_t addr;
     uint64_t size;
@@ -154,7 +159,7 @@ struct pongo_exports {
     void * value;
 };
 
-extern void panic(const char* string);
+extern _Noreturn __attribute__((format(printf, 1, 2))) void panic(const char* string, ...);
 extern void spin(uint32_t usec);
 extern uint64_t get_ticks();
 extern void usleep(uint32_t usec);
@@ -197,3 +202,4 @@ extern uint32_t ramdisk_size;
 extern uint32_t autoboot_count;
 extern uint8_t * loader_xfer_recv_data;
 extern uint32_t loader_xfer_recv_count;
+#endif

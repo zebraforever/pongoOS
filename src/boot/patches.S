@@ -1,7 +1,7 @@
-/* 
+/*
  * pongoOS - https://checkra.in
- * 
- * Copyright (C) 2019-2020 checkra1n team
+ *
+ * Copyright (C) 2019-2021 checkra1n team
  *
  * This file is part of pongoOS.
  *
@@ -11,10 +11,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,7 +22,7 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- * 
+ *
  */
 
 // ********************************************************
@@ -33,8 +33,9 @@
 // **                                                    **
 // ********************************************************
 
+.align 2
 
-// void iorvbar_yeet(const volatile void *ro, volatile void *rw)
+// void iorvbar_yeet(volatile void *boot_image)
 
 /*
 RVBAR_ELx is controlled by the IORVBAR MMIO register.
@@ -57,6 +58,8 @@ Per SoC:
 | A10  | 0x202050000 | 0x202150000 |             |             |             |             |             |             |
 +------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+
 | A10X | 0x202050000 | 0x202150000 | 0x202250000 |             |             |             |             |             |
++------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+
+| T2   | 0x202050000 | 0x202150000 |             |             |             |             |             |             |
 +------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+
 | A11  | 0x208450000 | 0x208550000 |             |             | 0x208050000 | 0x208150000 | 0x208250000 | 0x208350000 |
 +------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+-------------+
@@ -82,44 +85,71 @@ The patch works by finding this sequence of instructions:
 | orr xM, xN, 1                  |
 +--------------------------------+
 
-In radare2, this can be found with the following masked hexsearch:
+Starting with iOS 15, it seems the function has changed to instead
+take an argument that is directly OR'ed into the value:
+
++--------------------------------+
+| and xN, x0, 0xfffffffffffff800 |
+| mov wK, w1                     |
+| orr xM, xN, xK                 |
++--------------------------------+
+
+In radare2, this can be found with the following masked hexsearch respectively:
 
 /x 00d07592000040b2:e0ffffff00fcffff
+/x 00d07592e003012a000000aa:e0ffffffe0ffffff00fce0ff
 
 We just yeet out the orr, so that iBoot sets the RVBAR address but doesn't lock it.
 This means we change the instruction from orr-immediate to orr-register, with xzr as 3rd operand.
 */
 
-.align 2
+#ifndef NO_GLOBAL
 .globl iorvbar_yeet
 iorvbar_yeet:
-    // x0 = ro
-    // x1 = rw
+#else
+L_iorvbar_yeet:
+#endif
     mov x2, x0 // instr
     movz w5, 0x9275, lsl 16 // and xN, x0, 0xfffffffffffff800
     movk w5, 0xd000
     movz w6, 0xb240, lsl 16 // orr xM, xN, 1
     movz w7, 0xaa1f, lsl 16 // orr xM, xN, xzr
+    movz w8, 0x2a01, lsl 16 // mov wK, w1
+    movk w8, 0x03e0
 1:
+    // Match 0xfffffffffffff800
     ldr w3, [x2], 0x4
     and w4, w3, 0xffffffe0
     cmp w4, w5
     b.ne 1b
+    // Match orr with immediate
     bfi w6, w3, 5, 5
     ldr w4, [x2]
     and w3, w4, 0xffffffe0
     cmp w3, w6
+    b.eq 2f
+    // Match arg1
+    cmp w3, w8
     b.ne 1b
+    // Match orr with reg
+    and w9, w6, 0x3e0
+    movk w9, 0xaa00, lsl 16 // orr xM, xN, xK
+    bfi w9, w4, 16, 5
+    ldr w4, [x2, 0x4]
+    and w3, w4, 0xffffffe0
+    cmp w3, w9
+    b.ne 1b
+    add x2, x2, 0x4
+2:
+    // Patch
     bfi w7, w4, 0, 10
-    sub x2, x2, x0
-    add x2, x2, x1
     str w7, [x2]
     dmb sy
     isb sy
     ret
 
 
-// void aes_keygen(const volatile void *ro, volatile void *rw)
+// void aes_keygen(volatile void *boot_image)
 
 /*
 iDevices seem to have three builtin AES keys: UID, GID0 and GID1.
@@ -150,6 +180,8 @@ The following table shows the relevant MMIO addresses:
 +------+-------------+-------------+
 | A10X | 0x2102d0000 |             |
 +------+-------------+-------------+
+| T2   | 0x2112d0000 |             |
++------+-------------+-------------+
 | A11  | 0x2352d0000 |             |
 +------+-------------+-------------+
 | A12  | 0x23d2d0000 |             |
@@ -166,6 +198,8 @@ Before A9, devices go through ROM and LLB after deep sleep and relock, and
 there's nothing we can do about that, except not entering deep sleep, ever.
 On A9 and later this is handled by the AOP reconfig engine, which enables us to
 actually keep this patch persistent, but obviously needs a separate patch (see below).
+On a more curious note, the AES_DISABLE seems to actually persist across deep sleep
+without the aid of the reconfig engine, yet some SoCs still re-lock it.
 
 
 The AES patch works by finding two calls to security_allow_modes(), which immediately
@@ -198,11 +232,12 @@ We find this sequence, seek to the next bl, then dereference it and write a "ret
 We do this rather than nop'ing the branch because there is more than one call site.
 */
 
-.align 2
+#ifndef NO_GLOBAL
 .globl aes_keygen
 aes_keygen:
-    // x0 = ro
-    // x1 = rw
+#else
+L_aes_keygen:
+#endif
     mov x2, x0 // instr
     movz w7, 0x320e, lsl 16 // orr w0, wzr, 0x40000
     movk w7, 0x03e0
@@ -246,8 +281,6 @@ aes_keygen:
     cmp w4, 0x25 // check for bl
     b.ne 2b
     sbfx w3, w3, 0, 26
-    sub x2, x2, x0
-    add x2, x2, x1
     ldr w7, Lol
     str w7, [x2, w3, sxtw 2]
     dmb sy
@@ -256,7 +289,7 @@ Lol:
     ret
 
 
-// void recfg_yoink(const volatile void *ro, volatile void *rw)
+// void recfg_yoink(volatile void *boot_image)
 
 /*
 The reconfig engine works by having eight separate config sequences that are run on different events.
@@ -296,21 +329,27 @@ The relevant addresses are:
 +------+---------------+--------------+---------------+---------------------+-------------------+
 | A10X |  0x210000100  |              |  0x210800008  |     0x21000011c     |    0x210000120    |
 +------+---------------+--------------+---------------+---------------------+-------------------+
-| A11  |  0x2352c0200  | 0x2352c0214  |  0x234800008  |     0x235000200     |    0x235000204    |
+| T2   |  0x2112c0200  | 0x2112c0214  |               |     0x211000200     |    0x211000204    |
 +------+---------------+--------------+---------------+---------------------+-------------------+
-| A12  |  0x23d2c0200  | 0x23d2c0214  |       ?       |     0x23d000200     |    0x23d000204    |
+| A11  |  0x2352c0200  | 0x2352c0214  |               |     0x235000200     |    0x235000204    |
 +------+---------------+--------------+---------------+---------------------+-------------------+
-| A12X |       ?       |              |       ?       |          ?          |         ?         |
+| A12  |  0x23d2c0200  | 0x23d2c0214  |               |     0x23d000200     |    0x23d000204    |
 +------+---------------+--------------+---------------+---------------------+-------------------+
-| A13  |       ?       |              |       ?       |          ?          |         ?         |
+| A12X |       ?       |      ?       |               |          ?          |         ?         |
++------+---------------+--------------+---------------+---------------------+-------------------+
+| A13  |       ?       |      ?       |               |          ?          |         ?         |
 +------+---------------+--------------+---------------+---------------------+-------------------+
 
-- AOP_CFG_TABLE is a 32-bit offset from the SRAM base. Mask pre-A11 0x1fff80, A11+ 0xff80.
-- AOP_CFG_LOCK is a 1-bit register that locks down AOP_CFG_TABLE (A11+ only).
+- AOP_CFG_TABLE is a 32-bit offset from the SRAM base. Mask pre-A11 0x1fff80, T2/A11+ 0xff80.
+  At the address it points to is an uint32_t[8] array of 36-bit physical addresses >> 4.
+- AOP_CFG_LOCK is a 1-bit register that locks down AOP_CFG_TABLE (T2/A11+ only).
+  Before T2/A11, AOP_CFG_TABLE is locked down by AOP_SRAM_LOCK_SET instead.
 - AOP_SRAM_BASE is the 32-bit physical address of AOP SRAM, minus 0x200000000.
+  On T2/A11 and later, the AOP and the reconfig engine have separate SRAM, so this is irrelevant.
 - AOP_SRAM_LOCK_RANGE has two ranges, [14:0] and [30:16], which are the
   start and end numbers (inclusive) of 0x40-blocks to lock down.
-- AOP_SRAM_LOCK_SET is a 1-bit register that locks down AOP_SRAM_LOCK_RANGE.
+- AOP_SRAM_LOCK_SET is a 1-bit register that locks down AOP_SRAM_LOCK_RANGE,
+  and before T2/A11 also AOP_CFG_TABLE.
 
 Here too iBoot issues a "dmb sy" after writing.
 
@@ -339,7 +378,6 @@ Or on new clang:
 | bl 0x...  |
 +-----------+
 
-
 In r2:
 
 /x e007003200000094e007003200000094e007003200000094:ffffffff000000fcffffffff000000fcffffffff000000fc
@@ -351,11 +389,12 @@ a ret to nop the lock. Absolutely everything else is deferred to PongoOS.
 
 #ifndef NO_RECFG
 
-.align 2
+#ifndef NO_GLOBAL
 .globl recfg_yoink
 recfg_yoink:
-    // x0 = ro
-    // x1 = rw
+#else
+L_recfg_yoink:
+#endif
     mov x2, x0 // instr
     movz w8, 0x3200, lsl 16 // orr w0, wzr, 3
     movk w8, 0x07e0
@@ -387,8 +426,6 @@ recfg_yoink:
     // Deref and patch
     add x2, x2, 0x10
     sbfx w7, w7, 0, 26
-    sub x2, x2, x0
-    add x2, x2, x1
     ldr w3, Lul
     str w3, [x2, w7, sxtw 2]
     dmb sy

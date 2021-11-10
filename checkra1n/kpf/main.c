@@ -1,7 +1,7 @@
-/* 
+/*
  * pongoOS - https://checkra.in
- * 
- * Copyright (C) 2019-2020 checkra1n team
+ *
+ * Copyright (C) 2019-2021 checkra1n team
  *
  * This file is part of pongoOS.
  *
@@ -11,10 +11,10 @@
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -22,7 +22,7 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
- * 
+ *
  */
 #include <pongo.h>
 #include <mach-o/loader.h>
@@ -34,12 +34,20 @@
 uint32_t offsetof_p_flags, *dyld_hook;
 
 #if DEV_BUILD
-#define DEVLOG(x, ...) do { \
-    printf(x "\n", ##__VA_ARGS__); \
-} while (0)
+    #define DEVLOG(x, ...) do { \
+        printf(x "\n", ##__VA_ARGS__); \
+    } while (0)
+    #define panic_at(addr, str, ...) do { \
+        panic(str " (0x%llx)", ##__VA_ARGS__, xnu_ptr_to_va(addr)); \
+    } while (0)
 #else
-#define DEVLOG(x, ...) do {} while (0)
+    #define DEVLOG(x, ...) do {} while (0)
+    #define panic_at(addr, str, ...) do { \
+        (void)(addr); \
+        panic(str, ##__VA_ARGS__); \
+    } while (0)
 #endif
+
 #if 0
         // AES, sigh
         else if((fetch & 0xfffffc00) == 0x510fa000 && (apfs_privcheck[i+1] & 0xfffffc1f) == 0x7100081f && (apfs_privcheck[i+2] & 0xff00001f) == 0x54000003) {
@@ -157,7 +165,7 @@ bool kpf_dyld_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
     opcode_stream[1] = 0;             // BL dyld_hook;
     opcode_stream[2] = 0xAA0003E0|rn; // MOV x20, x0
     opcode_stream[3] = 0x14000008;    // B
-    puts("Patched dyld check");
+    puts("KPF: Patched dyld check");
     return true;
 }
 
@@ -197,9 +205,7 @@ bool kpf_amfi_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
         uint32_t* retpoint = find_next_insn(&opcode_stream[0], 0x180, RET, 0xffffffff);
         if (retpoint == NULL)
         {
-#if DEV_BUILD
-            puts("kpf_amfi_callback: failed to find retpoint");
-#endif
+            DEVLOG("kpf_amfi_callback: failed to find retpoint");
             return false;
         }
         uint32_t *patchpoint = find_prev_insn(retpoint, 0x40, 0xAA0003E0, 0xffe0ffff);
@@ -218,9 +224,7 @@ bool kpf_amfi_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
         }
         if(!found_something)
         {
-#if DEV_BUILD
-            puts("kpf_amfi_callback: failed to find anything");
-#endif
+            DEVLOG("kpf_amfi_callback: failed to find anything");
             return false;
         }
         puts("KPF: Found AMFI (Routine)");
@@ -239,9 +243,7 @@ bool kpf_mac_mount_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
     }
     if (!mac_mount_1) {
         kpf_has_done_mac_mount = false;
-#if DEV_BUILD
-        puts("kpf_mac_mount_callback: failed to find NOP point");
-#endif
+        DEVLOG("kpf_mac_mount_callback: failed to find NOP point");
         return false;
     }
     mac_mount_1[0] = NOP;
@@ -252,9 +254,7 @@ bool kpf_mac_mount_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
     }
     if (!mac_mount_1) {
         kpf_has_done_mac_mount = false;
-#if DEV_BUILD
-        puts("kpf_mac_mount_callback: failed to find xzr point");
-#endif
+        DEVLOG("kpf_mac_mount_callback: failed to find xzr point");
         return false;
     }
     // replace with a mov x8, xzr
@@ -267,6 +267,7 @@ bool kpf_mac_mount_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
 }
 
 bool kpf_conversion_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
+    uint32_t * const orig = opcode_stream;
     uint32_t lr1 = opcode_stream[0],
              lr2 = opcode_stream[2];
     // step 2
@@ -274,10 +275,7 @@ bool kpf_conversion_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream
     // it makes also sure that both lr offsets are the same
     if((lr1 & 0x1f) != (opcode_stream[1] & 0x1f) || (lr2 & 0x1f) != (opcode_stream[3] & 0x1f) || (lr1 & 0x3ffc00) != (lr2 & 0x3ffc00))
     {
-#if DEV_BUILD
-        puts("kpf_conversion_callback: opcode check failed");
-#endif
-        return false;
+        panic_at(orig, "kpf_conversion_callback: opcode check failed");
     }
     puts("KPF: Found task_conversion_eval");
 
@@ -287,14 +285,22 @@ bool kpf_conversion_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream
     // for that we first get both of the regs that are used in both of the ldrs (should point to caller and victim)
     // then we look for a cmp where both of them are used
     // this also does some basic flow analysis where it will detect moves that move caller and victim around
+    // and we have to check that it is followed by either a ccmp or a b.eq/b.ne, to make sure we got the right one in case there are multiple
     uint32_t regs = (1 << ((lr1 >> 5) & 0x1f)) | (1 << ((lr2 >> 5) & 0x1f));
     for(size_t i = 0; i < 128; ++i) // arbitrary limit
     {
         uint32_t op = *--opcode_stream;
         if((op & 0xffe0fc1f) == 0xeb00001f && (regs & (1 << ((op >> 5) & 0x1f))) != 0 && (regs & (1 << ((op >> 16) & 0x1f))) != 0) // cmp xN, xM
         {
-            *opcode_stream = 0xeb1f03ff; // cmp xzr, xzr
-            return true;
+            uint32_t next = opcode_stream[1];
+            if(
+                (next & 0xffe0fc10) == 0xfa401000 || // ccmp x*, x*, ?, ne
+                (next & 0xff00001e) == 0x54000000    // b.eq or b.ne
+            )
+            {
+                *opcode_stream = 0xeb1f03ff; // cmp xzr, xzr
+                return true;
+            }
         }
         else if((op & 0xffe0ffe0) == 0xaa0003e0) // mov xN, xM
         {
@@ -303,10 +309,7 @@ bool kpf_conversion_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream
             regs |= ((regs >> dst) & 1) << src;
         }
     }
-#if DEV_BUILD
-    puts("kpf_conversion_callback: failed to find cmp");
-#endif
-    return false;
+    panic_at(orig, "kpf_conversion_callback: failed to find cmp");
 }
 void kpf_conversion_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
     // this patch is here to allow the usage of the extracted tfp0 port from userland (see https://bazad.github.io/2018/10/bypassing-platform-binary-task-threads/#the-platform-binary-mitigation)
@@ -344,7 +347,7 @@ void kpf_conversion_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
     // 0xfffffff00713dd00      41070054       b.ne 0xfffffff00713dde8
 
     // to find this with r2 run the following cmd:
-    // /x 000040b900005036000040b900005036:0000c0ff0000f8ff0000c0ff0000f8ff
+    // /x 000040b900005036000040b900005036:0000c0ff0000f8ff0000c0ff0000f8fe
     uint64_t matches[] = {
         0xb9400000, // ldr x*, [x*]
         0x36500000, // tbz w*, 0xa, *
@@ -355,7 +358,7 @@ void kpf_conversion_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
         0xffc00000,
         0xfff80000,
         0xffc00000,
-        0xfef80000,
+        0xfef80000, // match both tbz or tbnz
     };
     xnu_pf_maskmatch(xnu_text_exec_patchset, "conversion_patch", matches, masks, sizeof(matches)/sizeof(uint64_t), true, (void*)kpf_conversion_callback);
 }
@@ -437,7 +440,7 @@ void kpf_convert_port_to_map_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
         0xfffffe1f, // cmp w[16-31], #1
         0xff00001f, // b.eq *
     };
-    xnu_pf_maskmatch(xnu_text_exec_patchset, "convert_port_to_map", matches, masks, sizeof(matches)/sizeof(uint64_t), false, (void*)kpf_convert_port_to_map_callback);
+    xnu_pf_maskmatch(xnu_text_exec_patchset, "convert_port_to_map", matches, masks, sizeof(matches)/sizeof(uint64_t), true, (void*)kpf_convert_port_to_map_callback);
 }
 
 void kpf_dyld_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
@@ -674,9 +677,7 @@ bool kpf_find_shellcode_area_callback(struct xnu_pf_patch* patch, uint32_t* opco
 {
     if(shellcode_area)
     {
-#if DEV_BUILD
-        puts("kpf_find_shellcode_area_callback: already ran, skipping...");
-#endif
+        DEVLOG("kpf_find_shellcode_area_callback: already ran, skipping...");
         return false;
     }
     shellcode_area = opcode_stream;
@@ -704,9 +705,7 @@ bool kpf_mac_vm_map_protect_callback(struct xnu_pf_patch* patch, uint32_t* opcod
     uint32_t* first_ldr = find_next_insn(&opcode_stream[0], 0x400, 0x37480000, 0xFFFF0000);
     if(!first_ldr)
     {
-#if DEV_BUILD
-        puts("kpf_mac_vm_map_protect_callback: failed to find ldr");
-#endif
+        DEVLOG("kpf_mac_vm_map_protect_callback: failed to find ldr");
         return false;
     }
     first_ldr++;
@@ -815,9 +814,7 @@ bool vm_fault_enter_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream
             return true;
         }
     }
-#if DEV_BUILD
-    puts("vm_fault_enter_callback: failed to find patch point");
-#endif
+    DEVLOG("vm_fault_enter_callback: failed to find patch point");
     return false;
 }
 
@@ -898,6 +895,17 @@ void kpf_mac_vm_fault_enter_patch(xnu_pf_patchset_t* xnu_text_exec_patchset) {
         0xFFFFFFE0,
     };
     xnu_pf_maskmatch(xnu_text_exec_patchset, "vm_fault_enter", matches14, masks14, sizeof(matches14)/sizeof(uint64_t), false, (void*)vm_fault_enter_callback14);
+    uint64_t matches14_alt[] = {
+        0x36180000, // TBZ #3
+        0xAA170210, // MOV Xd, Xn (both regs >= 16)
+        0x52800000, // MOV #0
+    };
+    uint64_t masks14_alt[] = {
+        0xFFF80000,
+        0xFFFFFE10,
+        0xFFFFFFE0,
+    };
+    xnu_pf_maskmatch(xnu_text_exec_patchset, "vm_fault_enter", matches14_alt, masks14_alt, sizeof(matches14_alt)/sizeof(uint64_t), false, (void*)vm_fault_enter_callback14);
 }
 
 static bool nvram_inline_patch = false;
@@ -1052,9 +1060,7 @@ bool vnode_getpath_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
 {
     if(repatch_ldr_x19_vnode_pathoff)
     {
-#if DEV_BUILD
-        puts("vnode_getpath_callback: already ran, skipping...");
-#endif
+        DEVLOG("vnode_getpath_callback: already ran, skipping...");
         return false;
     }
     puts("KPF: Found vnode_getpath");
@@ -1067,9 +1073,7 @@ bool ret0_gadget_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
 {
     if(ret0_gadget)
     {
-#if DEV_BUILD
-        puts("ret0_gadget_callback: already ran, skipping...");
-#endif
+        DEVLOG("ret0_gadget_callback: already ran, skipping...");
         return false;
     }
     puts("KPF: Found ret0 gadget");
@@ -1086,9 +1090,7 @@ bool vnode_lookup_callback(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
 {
     if(vnode_lookup)
     {
-#if DEV_BUILD
-        puts("vnode_lookup_callback: already ran, skipping...");
-#endif
+        DEVLOG("vnode_lookup_callback: already ran, skipping...");
         return false;
     }
     uint32_t *try = &opcode_stream[8]+((opcode_stream[8]>>5)&0xFFF);
@@ -1171,9 +1173,7 @@ bool mach_traps_callback(struct xnu_pf_patch* patch, uint64_t* mach_traps) {
     uint32_t* tfp0check = find_next_insn((uint32_t*)xnu_va_to_ptr(tfp), 0x20, 0x34000000, 0xff000000);
     if(!tfp0check)
     {
-#if DEV_BUILD
-        puts("mach_traps_callback: failed to find tfp0check");
-#endif
+        DEVLOG("mach_traps_callback: failed to find tfp0check");
         return false;
     }
 
@@ -1203,9 +1203,7 @@ bool kpf_apfs_patches_mount(struct xnu_pf_patch* patch, uint32_t* opcode_stream)
     // cmp x0, x8
     uint32_t* f_apfs_privcheck = find_next_insn(opcode_stream, 0x10, 0xeb08001f, 0xFFFFFFFF);
     if (!f_apfs_privcheck) {
-#if DEV_BUILD
-        puts("kpf_apfs_patches_mount: failed to find f_apfs_privcheck");
-#endif
+        DEVLOG("kpf_apfs_patches_mount: failed to find f_apfs_privcheck");
         return false;
     }
     puts("KPF: Found APFS mount");
@@ -1250,19 +1248,21 @@ void kpf_apfs_patches(xnu_pf_patchset_t* patchset) {
     // 0xfffffff0068f3d5c      e01f00f9       str x0, [sp, 0x38]
     // 0xfffffff0068f3d60      08c44039       ldrb w8, [x0, 0x31] ; [0x31:4]=
     // 0xfffffff0068f3d64      68043037       tbnz w8, 6, 0xfffffff0068f3df0 <- patch this out
+    // Since iOS 15, the "str" can also be "stur", so we mask out one of the upper bits to catch both,
+    // and we apply a mask of 0x1d to the base register, to catch exactly x29 and sp.
     // r2 cmd:
-    // /x 000000f9000000f90000403900003037:000000ff000000ff0000ffff0000ffff
+    // /x a00300f8a00300f80000403900003037:a003c0fea003c0fe0000feff0000f8ff
     uint64_t i_matches[] = {
-        0xF9000000, // str x*, [x*]
-        0xF9000000, // str x*, [x*]
+        0xf80003a0, // st(u)r x*, [x29/sp, *]
+        0xf80003a0, // st(u)r x*, [x29/sp, *]
         0x39400000, // ldrb w*, [x*]
-        0x37300000  // tbnz w*, 6, *
+        0x37300000, // tbnz w*, 6, *
     };
     uint64_t i_masks[] = {
-        0xff000000,
-        0xff000000,
-        0xffff0000,
-        0xffff0000,
+        0xfec003a0,
+        0xfec003a0,
+        0xfffe0000,
+        0xfff80000,
     };
     xnu_pf_maskmatch(patchset, "apfs_patch_rename", i_matches, i_masks, sizeof(i_matches)/sizeof(uint64_t), true, (void*)kpf_apfs_patches_rename);
 }
@@ -1271,9 +1271,7 @@ bool kpf_amfi_execve_tail(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
     amfi_ret = find_next_insn(opcode_stream, 0x80, RET, 0xFFFFFFFF);
     if (!amfi_ret)
     {
-#if DEV_BUILD
-        puts("kpf_amfi_execve_tail: failed to find amfi_ret");
-#endif
+        DEVLOG("kpf_amfi_execve_tail: failed to find amfi_ret");
         return false;
     }
     puts("KPF: Found AMFI execve hook");
@@ -1283,9 +1281,7 @@ bool kpf_amfi_execve_tail(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
 bool kpf_amfi_sha1(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
     uint32_t* cmp = find_next_insn(opcode_stream, 0x10, 0x7100081f, 0xFFFFFFFF); // cmp w0, 2
     if (!cmp) {
-#if DEV_BUILD
-        puts("kpf_amfi_sha1: failed to find cmp");
-#endif
+        DEVLOG("kpf_amfi_sha1: failed to find cmp");
         return false;
     }
     puts("KPF: Found AMFI hashtype check");
@@ -1294,73 +1290,83 @@ bool kpf_amfi_sha1(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
     return true;
 }
 
-bool kpf_find_offset_p_flags(uint32_t *proc_issetugid) {
+void kpf_find_offset_p_flags(uint32_t *proc_issetugid) {
     DEVLOG("Found kpf_find_offset_p_flags 0x%llx", xnu_ptr_to_va(proc_issetugid));
     if (!proc_issetugid) {
-        DEVLOG("kpf_find_offset_p_flags called with no argument");
-        return false;
+        panic("kpf_find_offset_p_flags called with no argument");
     }
     // FIND LDR AND READ OFFSET
-    uint32_t* ldr = find_next_insn(proc_issetugid, 0x10, 0xB9400000, 0xFFC003C0);
-    if (!ldr) {
-        DEVLOG("kpf_find_offset_p_flags failed to find LDR");
-        return false;
+    if((*proc_issetugid & 0xffc003c0) != 0xb9400000)
+    {
+        panic("kpf_find_offset_p_flags failed to find LDR");
     }
-    offsetof_p_flags = ((*ldr>>10)&0xFFF)<<2;
+    offsetof_p_flags = ((*proc_issetugid>>10)&0xFFF)<<2;
     DEVLOG("Found offsetof_p_flags %x", offsetof_p_flags);
-    return true;
 }
 
-bool kpf_amfi_mac_syscall(struct xnu_pf_patch* patch, uint32_t* opcode_stream) {
-    uint32_t* rep = opcode_stream;
-    char foundit = 0;
-    for (int i=0; i<200; i++) { // 02 01 80 52
-        if ((rep[0] == 0x321d03e2 /*orr w2, wzr, 8*/|| rep[0] == 0x52800102 /* movz w2, 8 */) && ((rep[1] & 0xFF000000) == 0x14000000 || (rep[3] & 0xFF000000) == 0x14000000 /* b */)) {
-            foundit = 1;
+bool found_amfi_mac_syscall = false;
+bool kpf_amfi_mac_syscall(struct xnu_pf_patch *patch, uint32_t *opcode_stream) {
+    if(found_amfi_mac_syscall)
+    {
+        panic("amfi_mac_syscall found twice!");
+    }
+    // Our initial masking match is extremely broad and we have two of them so
+    // we have to mark both as non-required, which means returning false does
+    // nothing. But we panic on failure, so if we survive, we patched successfully.
+    found_amfi_mac_syscall = true;
+
+    bool foundit = false;
+    uint32_t *rep = opcode_stream;
+    for(size_t i = 0; i < 25; ++i)
+    {
+        if((rep[0] == 0x321c03e2 /* orr w2, wzr, 0x10 */ || rep[0] == 0x52800202 /* movz w2, 0x10 */))
+        {
+            foundit = true;
             puts("KPF: Found AMFI mac_syscall");
             break;
         }
         rep++;
     }
-    if (!foundit) {
-        puts("KPF: Failed to patch mac_syscall");
-        return false;
-    } else {
-        while (1) {
-            if ((rep[0] & 0xFC000000) == 0x94000000) { // bl *
-                // Follow call to check_dyld_policy_internal
-                uint32_t* check_dyld_policy_internal = follow_call(rep);
-                if (!check_dyld_policy_internal) {
-                    DEVLOG("Failed to follow call at 0x%llx to check_dyld_policy_internal", xnu_ptr_to_va(rep));
-                    puts("KPF: Failed to patch mac_syscall");
-                }
-                uint32_t* ref = check_dyld_policy_internal;
-                // Find call to proc_issetuid
-                ref = find_next_insn(ref, 0x18, 0x94000000, 0xFC000000);
-                if ((ref[1]&0xFF00001F) != 0x34000000) {
-                    DEVLOG("CBZ missing after call to proc_issetuid in 0x%llx", xnu_ptr_to_va(check_dyld_policy_internal));
-                    puts("KPF: Failed to patch mac_syscall");
-                    return false;
-                }
-                // Save offset of p_flags
-                kpf_find_offset_p_flags(follow_call(ref));
-                // Follow CBZ
-                ref++;
-                ref += (*ref>>5)&0x7FFFF;
-                uint32_t *cmp = find_next_insn(ref, 0x10, 0x7100001F, 0xFFFFFFFF); // CMP W0, #0
-                if (!cmp) {
-                    DEVLOG("CMP W0 missing after following CBZ to 0x%llx", xnu_ptr_to_va(ref));
-                    puts("KPF: Failed to patch mac_syscall");
-                    return false;
-                }
-                ref = cmp-1;
-                *ref = 0x52800020; // MOV W0, #1
-                break;
-            }
-            rep--;
-        }
+    if(!foundit)
+    {
+        panic_at(rep, "Failed to find w2 in mac_syscall");
     }
-    xnu_pf_disable_patch(patch);
+    uint32_t *copyin = find_next_insn(rep + 1, 2, 0x94000000, 0xfc000000); // bl
+    if(!copyin)
+    {
+        panic_at(rep, "Failed to find copyin in mac_syscall");
+    }
+    uint32_t *bl = find_next_insn(copyin + 1, 10, 0x94000000, 0xfc000000);
+    if(!bl)
+    {
+        panic_at(rep, "Failed to find check_dyld_policy_internal in mac_syscall");
+    }
+    uint32_t *check_dyld_policy_internal = follow_call(bl);
+    if(!check_dyld_policy_internal)
+    {
+        panic_at(bl, "Failed to follow call to check_dyld_policy_internal");
+    }
+    // Find call to proc_issetuid
+    uint32_t *ref = find_next_insn(check_dyld_policy_internal, 10, 0x94000000, 0xfc000000);
+    if((ref[1] & 0xff00001f) != 0x34000000)
+    {
+        panic_at(check_dyld_policy_internal, "CBZ missing after call to proc_issetuid");
+    }
+    // Save offset of p_flags
+    kpf_find_offset_p_flags(follow_call(ref));
+    // Follow CBZ
+    ref++;
+    ref += sxt32(*ref >> 5, 19); // uint32 takes care of << 2
+    uint32_t *proc_has_get_task_allow = find_next_insn(ref, 5, 0x94000000, 0xfc000000);
+    if(!proc_has_get_task_allow)
+    {
+        panic_at(ref, "Failed to find proc_has_get_task_allow in check_dyld_policy_internal");
+    }
+    if((proc_has_get_task_allow[1] != 0x7100001f /* cmp w0, 0 */) && ((proc_has_get_task_allow[1] & 0xfff8001f) != 0x36000000 /* tbz w0, 0, ... */))
+    {
+        panic_at(check_dyld_policy_internal, "CMP/TBZ missing after call to proc_has_get_task_allow");
+    }
+    proc_has_get_task_allow[0] = 0x52800020; // MOV W0, #1
     return true;
 }
 void kpf_amfi_kext_patches(xnu_pf_patchset_t* patchset) {
@@ -1447,7 +1453,58 @@ void kpf_amfi_kext_patches(xnu_pf_patchset_t* patchset) {
         0,
         0xffffffff,
     };
-    xnu_pf_maskmatch(patchset, "amfi_mac_syscall", ii_matches, ii_masks, sizeof(ii_matches)/sizeof(uint64_t), true, (void*)kpf_amfi_mac_syscall);
+    xnu_pf_maskmatch(patchset, "amfi_mac_syscall", ii_matches, ii_masks, sizeof(ii_matches)/sizeof(uint64_t), false, (void*)kpf_amfi_mac_syscall);
+
+    // iOS 15 changed to a switch/case:
+    //
+    // 0xfffffff00830e9cc      ff4303d1       sub sp, sp, 0xd0
+    // 0xfffffff00830e9d0      f6570aa9       stp x22, x21, [sp, 0xa0]
+    // 0xfffffff00830e9d4      f44f0ba9       stp x20, x19, [sp, 0xb0]
+    // 0xfffffff00830e9d8      fd7b0ca9       stp x29, x30, [sp, 0xc0]
+    // 0xfffffff00830e9dc      fd030391       add x29, sp, 0xc0
+    // 0xfffffff00830e9e0      08a600b0       adrp x8, 0xfffffff0097cf000
+    // 0xfffffff00830e9e4      1f2003d5       nop
+    // 0xfffffff00830e9e8      083940f9       ldr x8, [x8, 0x70]
+    // 0xfffffff00830e9ec      a8831df8       stur x8, [x29, -0x28]
+    // 0xfffffff00830e9f0      d3098052       mov w19, 0x4e
+    // 0xfffffff00830e9f4      28680151       sub w8, w1, 0x5a
+    // 0xfffffff00830e9f8      1f290071       cmp w8, 0xa
+    // 0xfffffff00830e9fc      88150054       b.hi 0xfffffff00830ecac
+    // 0xfffffff00830ea00      f40302aa       mov x20, x2
+    // 0xfffffff00830ea04      f50300aa       mov x21, x0
+    // 0xfffffff00830ea08      296afff0       adrp x9, 0xfffffff007055000
+    // 0xfffffff00830ea0c      29c13d91       add x9, x9, 0xf70
+    // 0xfffffff00830ea10      8a000010       adr x10, 0xfffffff00830ea20
+    // 0xfffffff00830ea14      2b696838       ldrb w11, [x9, x8]
+    // 0xfffffff00830ea18      4a090b8b       add x10, x10, x11, lsl 2
+    // 0xfffffff00830ea1c      40011fd6       br x10
+    // 0xfffffff00830ea20      40e5054f       movi v0.16b, 0xaa
+    // 0xfffffff00830ea24      e00f803d       str q0, [sp, 0x30]
+    // 0xfffffff00830ea28      ff0f00f9       str xzr, [sp, 0x18]
+    // 0xfffffff00830ea2c      f41300b4       cbz x20, 0xfffffff00830eca8
+    // 0xfffffff00830ea30      e1c30091       add x1, sp, 0x30
+    // 0xfffffff00830ea34      e00314aa       mov x0, x20
+    // 0xfffffff00830ea38      02028052       mov w2, 0x10
+    // 0xfffffff00830ea3c      8e3ee797       bl 0xfffffff007cde474
+    // 0xfffffff00830ea40      f30300aa       mov x19, x0
+    // 0xfffffff00830ea44      40130035       cbnz w0, 0xfffffff00830ecac
+    // 0xfffffff00830ea48      e1630091       add x1, sp, 0x18
+    // 0xfffffff00830ea4c      e00315aa       mov x0, x21
+    // 0xfffffff00830ea50      7c020094       bl 0xfffffff00830f440
+    // 0xfffffff00830ea54      e11f40f9       ldr x1, [sp, 0x38]
+    // 0xfffffff00830ea58      e0630091       add x0, sp, 0x18
+    // 0xfffffff00830ea5c      02018052       mov w2, 8
+    // 0xfffffff00830ea60      50000014       b 0xfffffff00830eba0
+    //
+    // We find the "sub wN, w1, 0x5a", then the "mov w2, 0x10; bl ..." after that, then the "bl" after that.
+    // /x 20680151:e0ffffff
+    uint64_t iii_matches[] = {
+        0x51016820, // sub wN, w1, 0x5a
+    };
+    uint64_t iii_masks[] = {
+        0xffffffe0,
+    };
+    xnu_pf_maskmatch(patchset, "amfi_mac_syscall_alt", iii_matches, iii_masks, sizeof(iii_matches)/sizeof(uint64_t), false, (void*)kpf_amfi_mac_syscall);
 }
 
 void kpf_sandbox_kext_patches(xnu_pf_patchset_t* patchset) {
@@ -1612,22 +1669,29 @@ void command_kpf() {
         xnu_pf_patchset_destroy(xnu_plk_data_const_patchset);
     }
 
+    const char kmap_port_string_14[] = "\"userspace has control access to a \" \"kernel map %p through task %p\""; // iOS 14 had broken panic strings
+    const char *kmap_port_string_14_match = memmem(text_cstring_range->cacheable_base, text_cstring_range->size, kmap_port_string_14, strlen(kmap_port_string_14));
+
     kpf_dyld_patch(xnu_text_exec_patchset);
     kpf_amfi_patch(xnu_text_exec_patchset);
     kpf_mac_mount_patch(xnu_text_exec_patchset);
     kpf_conversion_patch(xnu_text_exec_patchset);
-    kpf_convert_port_to_map_patch(xnu_text_exec_patchset);
     kpf_mac_dounmount_patch_0(xnu_text_exec_patchset);
     kpf_mac_vm_map_protect_patch(xnu_text_exec_patchset);
     kpf_mac_vm_fault_enter_patch(xnu_text_exec_patchset);
     kpf_nvram_unlock(xnu_text_exec_patchset);
     kpf_find_shellcode_area(xnu_text_exec_patchset);
     kpf_find_shellcode_funcs(xnu_text_exec_patchset);
+    if(kmap_port_string_14_match) // iOS 14 only
+    {
+        kpf_convert_port_to_map_patch(xnu_text_exec_patchset);
+    }
 
     xnu_pf_emit(xnu_text_exec_patchset);
     xnu_pf_apply(text_exec_range, xnu_text_exec_patchset);
     xnu_pf_patchset_destroy(xnu_text_exec_patchset);
 
+    if (!found_amfi_mac_syscall) panic("no amfi_mac_syscall");
     if (!dounmount_found) panic("no dounmount");
     if (!repatch_ldr_x19_vnode_pathoff) panic("no repatch_ldr_x19_vnode_pathoff");
     if (!shellcode_area) panic("no shellcode area?");
@@ -1751,10 +1815,13 @@ void command_kpf() {
         }
         nvram_patchpoint[0] = 0x14000000 | (((uint64_t)nvram_off >> 2) & 0x3ffffff);
     }
+#if !DEV_BUILD
+    // Treat this patch as optional in release
     else if(!nvram_inline_patch)
     {
         panic("Missing patch: nvram_unlock");
     }
+#endif
 
     if (!kpf_has_done_mac_mount) {
         panic("Missing patch: mac_mount");
@@ -1849,9 +1916,6 @@ void kpf_autoboot() {
 }
 
 void module_entry() {
-    extern void sep_setup(void);
-    sep_setup();
-
     puts("");
     puts("");
     puts("#==================");
@@ -1859,7 +1923,7 @@ void module_entry() {
     puts("# checkra1n kpf " CHECKRAIN_VERSION);
     puts("#");
     puts("# Proudly written in nano");
-    puts("# (c) 2019-2020 Kim Jong Cracks");
+    puts("# (c) 2019-2021 Kim Jong Cracks");
     puts("#");
     puts("# This software is not for sale");
     puts("# If you purchased this, please");
@@ -1880,7 +1944,7 @@ void module_entry() {
     command_register("autoboot", "checkra1n-kpf autoboot hook", kpf_autoboot);
     command_register("kpf", "running checkra1n-kpf without booting (use bootux afterwards)", command_kpf);
 }
-char* module_name = "checkra1n-kpf2-12.0,14.2";
+char* module_name = "checkra1n-kpf2-12.0,14.5";
 
 struct pongo_exports exported_symbols[] = {
     {.name = 0, .value = 0}
